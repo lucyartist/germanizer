@@ -114,4 +114,10 @@ Sprachmodelle optimieren auf statistische Wahrscheinlichkeit. Das Ergebnis ist T
 - [Wikipedia: Signs of AI writing (EN)](https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing)
 - [Wikipedia: Anzeichen für KI-generierte Inhalte (DE)](https://de.wikipedia.org/wiki/Wikipedia:Anzeichen_f%C3%BCr_KI-generierte_Inhalte)
 
+## Versionshistorie
 
+- **2.3.0** - Patterns 38-40 ergänzt (Abschnitts-Zusammenfassungen, Fazit-Sektionen, briefartige Floskeln); Querverweis auf deutsche Wikipedia-Seite
+- **2.2.0** - Deutsche Muster 25-37 ergänzt
+- **2.1.1** - Beispiel Pattern 18 korrigiert
+- **2.0.0** - Vollständige Überarbeitung auf Basis des Wikipedia-Artikels
+- **1.0.0** - Erstveröffentlichung
