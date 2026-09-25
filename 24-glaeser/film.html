@@ -1,0 +1,1329 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>24 Gläser</title>
+<style>
+  @font-face { font-family: 'Fraunces'; src: url(fonts/fraunces-latin-full-normal.woff2) format('woff2'); font-weight: 100 900; font-style: normal; }
+  @font-face { font-family: 'Fraunces'; src: url(fonts/fraunces-latin-full-italic.woff2) format('woff2'); font-weight: 100 900; font-style: italic; }
+  @font-face { font-family: 'Inter'; src: url(fonts/inter-latin-standard-normal.woff2) format('woff2'); font-weight: 100 900; }
+  @font-face { font-family: 'Caveat'; src: url(fonts/caveat-latin-700-normal.woff2) format('woff2'); font-weight: 700; }
+  html, body { margin: 0; background: #1d1611; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1080" height="1920"></canvas>
+<script type="module">
+import * as T from './timeline.js';
+const { W, H, BEAT, bar } = T;
+
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+
+// ---------------------------------------------------------------- Farben
+const C = {
+  paper: '#f3e9d6',
+  paperDeep: '#eadbc0',
+  ink: '#2a1e17',
+  inkSoft: 'rgba(42,30,23,0.55)',
+  red: '#c8283a',
+  wood: '#b98556',
+  woodDark: '#8a5d38',
+  woodLight: '#d3a574',
+  skin: '#e7b48e',
+  skinShade: '#d69c76',
+  cheek: 'rgba(222,110,110,0.35)',
+  hair: '#3a2a22',
+  beanie: '#e0a43a',
+  beanieDark: '#bf8526',
+  sweater: '#2f6f73',
+  sweaterDark: '#245a5d',
+  strap: '#d8c3a0',
+  card: '#fbf5e8',
+  cloth: '#fbf3e4',
+  clothLine: 'rgba(200,40,58,0.22)',
+};
+
+// ---------------------------------------------------------------- Mathe
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const seg = (t, a, b) => clamp((t - a) / (b - a));
+const eOutCubic = (x) => 1 - Math.pow(1 - x, 3);
+const eInCubic = (x) => x * x * x;
+const eInOutCubic = (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+const eInOutSine = (x) => -(Math.cos(Math.PI * x) - 1) / 2;
+const eOutBack = (x, s = 1.7) => 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2);
+// Gedaempfte Feder in geschlossener Form: 0 -> 1 mit Ueberschwingen
+function spring(dt, freq = 2.4, zeta = 0.32) {
+  if (dt <= 0) return 0;
+  const w = 2 * Math.PI * freq;
+  const wd = w * Math.sqrt(1 - zeta * zeta);
+  return 1 - Math.exp(-zeta * w * dt) * (Math.cos(wd * dt) + ((zeta * w) / wd) * Math.sin(wd * dt));
+}
+// Ausschwingen um 0 nach einem Impuls
+function ring(dt, freq = 3, decay = 5) {
+  if (dt <= 0) return 0;
+  return Math.sin(2 * Math.PI * freq * dt) * Math.exp(-decay * dt);
+}
+function hash(a, b = 0, c = 0) {
+  let h = (a * 374761393 + b * 668265263 + c * 2246822519) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+// letztes Ereignis vor t in einer sortierten Liste
+function lastBefore(list, t) {
+  let r = null;
+  for (const e of list) if (e.t <= t) r = e; else break;
+  return r;
+}
+
+// ---------------------------------------------------------------- Handgezeichnete Linien
+// Linien "kochen" mit 12 Bildern pro Sekunde, wie bei Trickfilm auf Papier.
+let BOIL = 0;
+function jitterPts(pts, seed, amp) {
+  if (!amp) return pts;
+  return pts.map((p, i) => [
+    p[0] + (hash(seed, i, BOIL) - 0.5) * amp,
+    p[1] + (hash(seed + 7, i, BOIL) - 0.5) * amp,
+  ]);
+}
+function tracePts(pts, closed = true) {
+  const n = pts.length;
+  if (n < 3) { ctx.moveTo(pts[0][0], pts[0][1]); for (const p of pts) ctx.lineTo(p[0], p[1]); return; }
+  if (closed) {
+    const m0 = [(pts[n - 1][0] + pts[0][0]) / 2, (pts[n - 1][1] + pts[0][1]) / 2];
+    ctx.moveTo(m0[0], m0[1]);
+    for (let i = 0; i < n; i++) {
+      const p = pts[i], q = pts[(i + 1) % n];
+      ctx.quadraticCurveTo(p[0], p[1], (p[0] + q[0]) / 2, (p[1] + q[1]) / 2);
+    }
+    ctx.closePath();
+  } else {
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < n - 1; i++) {
+      const p = pts[i], q = pts[i + 1];
+      ctx.quadraticCurveTo(p[0], p[1], (p[0] + q[0]) / 2, (p[1] + q[1]) / 2);
+    }
+    ctx.lineTo(pts[n - 1][0], pts[n - 1][1]);
+  }
+}
+function rrPts(x, y, w, h, r, per = 5) {
+  const pts = [];
+  const corner = (cx, cy, a0) => { for (let i = 0; i <= per; i++) { const a = a0 + (i / per) * (Math.PI / 2); pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]); } };
+  corner(x + w - r, y + r, -Math.PI / 2);
+  corner(x + w - r, y + h - r, 0);
+  corner(x + r, y + h - r, Math.PI / 2);
+  corner(x + r, y + r, Math.PI);
+  return pts;
+}
+// Kanten unterteilen, damit das Glaetten nur die Ecken leicht rundet
+function densify(pts, step = 34, closed = true) {
+  const out = [];
+  const n = closed ? pts.length : pts.length - 1;
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const k = Math.max(1, Math.round(Math.hypot(b[0] - a[0], b[1] - a[1]) / step));
+    for (let j = 0; j < k; j++) out.push([a[0] + ((b[0] - a[0]) * j) / k, a[1] + ((b[1] - a[1]) * j) / k]);
+  }
+  if (!closed) out.push(pts[pts.length - 1]);
+  return out;
+}
+function ellPts(cx, cy, rx, ry, n = 28) {
+  const pts = [];
+  for (let i = 0; i < n; i++) { const a = (i / n) * Math.PI * 2; pts.push([cx + Math.cos(a) * rx, cy + Math.sin(a) * ry]); }
+  return pts;
+}
+function shape(pts, { fill, stroke = C.ink, lw = 3.5, seed = 1, amp = 2.2, closed = true } = {}) {
+  const p = jitterPts(pts, seed, amp);
+  ctx.beginPath();
+  tracePts(p, closed);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke && lw > 0) { ctx.lineWidth = lw; ctx.strokeStyle = stroke; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke(); }
+}
+function line(pts, { stroke = C.ink, lw = 3.5, seed = 3, amp = 2 } = {}) {
+  shape(pts, { stroke, lw, seed, amp, closed: false });
+}
+
+// ---------------------------------------------------------------- Texturen
+function makeCanvas(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+let PAPER, GRAIN = [], VIGNETTE;
+const PATTERNS = new Map();
+function buildTextures() {
+  // Papier: warme Flaeche, weiche Flecken, feine Fasern
+  PAPER = makeCanvas(W, H);
+  const p = PAPER.getContext('2d');
+  const g = p.createRadialGradient(W * 0.5, H * 0.42, 100, W * 0.5, H * 0.5, H * 0.75);
+  g.addColorStop(0, '#f7eedd');
+  g.addColorStop(1, '#eadcc2');
+  p.fillStyle = g;
+  p.fillRect(0, 0, W, H);
+  const r = T.rng(5);
+  for (let i = 0; i < 70; i++) {
+    const x = r() * W, y = r() * H, rad = 80 + r() * 260;
+    const gg = p.createRadialGradient(x, y, 0, x, y, rad);
+    const a = 0.012 + r() * 0.018;
+    gg.addColorStop(0, r() < 0.5 ? `rgba(160,120,70,${a})` : `rgba(255,250,240,${a * 1.5})`);
+    gg.addColorStop(1, 'rgba(0,0,0,0)');
+    p.fillStyle = gg;
+    p.fillRect(x - rad, y - rad, rad * 2, rad * 2);
+  }
+  p.lineCap = 'round';
+  for (let i = 0; i < 5200; i++) {
+    const x = r() * W, y = r() * H, len = 4 + r() * 18, a = r() * Math.PI;
+    p.strokeStyle = r() < 0.6 ? `rgba(120,90,55,${0.05 + r() * 0.06})` : `rgba(255,255,250,${0.08 + r() * 0.1})`;
+    p.lineWidth = 0.6 + r() * 0.9;
+    p.beginPath();
+    p.moveTo(x, y);
+    p.quadraticCurveTo(x + Math.cos(a) * len * 0.5 + (r() - 0.5) * 4, y + Math.sin(a) * len * 0.5 + (r() - 0.5) * 4, x + Math.cos(a) * len, y + Math.sin(a) * len);
+    p.stroke();
+  }
+  // Filmkorn: drei Varianten, wechseln mit 15 fps
+  for (let k = 0; k < 3; k++) {
+    const gc = makeCanvas(W / 2, H / 2);
+    const gx = gc.getContext('2d');
+    const id = gx.createImageData(W / 2, H / 2);
+    const rr = T.rng(900 + k);
+    for (let i = 0; i < id.data.length; i += 4) {
+      const v = rr() < 0.5 ? 0 : 255;
+      id.data[i] = id.data[i + 1] = id.data[i + 2] = v;
+      id.data[i + 3] = Math.floor(rr() * 26);
+    }
+    gx.putImageData(id, 0, 0);
+    GRAIN.push(gc);
+  }
+  VIGNETTE = makeCanvas(W, H);
+  const v = VIGNETTE.getContext('2d');
+  const vg = v.createRadialGradient(W / 2, H * 0.48, H * 0.32, W / 2, H * 0.5, H * 0.72);
+  vg.addColorStop(0, 'rgba(60,35,20,0)');
+  vg.addColorStop(1, 'rgba(60,35,20,0.22)');
+  v.fillStyle = vg;
+  v.fillRect(0, 0, W, H);
+}
+// Karomuster fuer die Stoffdeckel
+function gingham(color) {
+  if (PATTERNS.has(color)) return PATTERNS.get(color);
+  const s = 14;
+  const c = makeCanvas(s * 2, s * 2);
+  const g = c.getContext('2d');
+  g.fillStyle = '#fbf3e6';
+  g.fillRect(0, 0, s * 2, s * 2);
+  g.globalAlpha = 0.55;
+  g.fillStyle = color;
+  g.fillRect(0, 0, s, s * 2);
+  g.fillRect(0, 0, s * 2, s);
+  g.globalAlpha = 0.45;
+  g.fillRect(0, 0, s, s);
+  const pat = ctx.createPattern(c, 'repeat');
+  PATTERNS.set(color, pat);
+  return pat;
+}
+let CLOTH;
+function buildCloth() {
+  const s = 46;
+  const c = makeCanvas(s * 2, s * 2);
+  const g = c.getContext('2d');
+  g.fillStyle = C.cloth;
+  g.fillRect(0, 0, s * 2, s * 2);
+  g.fillStyle = 'rgba(200,40,58,0.16)';
+  g.fillRect(0, 0, s, s * 2);
+  g.fillRect(0, 0, s * 2, s);
+  g.fillStyle = 'rgba(200,40,58,0.12)';
+  g.fillRect(0, 0, s, s);
+  CLOTH = ctx.createPattern(c, 'repeat');
+}
+
+// ---------------------------------------------------------------- Text
+function setFont(size, weight = 600, family = 'Fraunces', italic = false) {
+  ctx.font = `${italic ? 'italic ' : ''}${weight} ${size}px ${family}`;
+}
+function wrap(text, maxW) {
+  const words = text.split(' ');
+  const lines = [];
+  let cur = '';
+  for (const w of words) {
+    const test = cur ? cur + ' ' + w : w;
+    if (ctx.measureText(test).width > maxW && cur) { lines.push(cur); cur = w; } else cur = test;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+// Woerter steigen versetzt auf und blenden ein; beim Ausblenden steigen sie weiter
+function words(text, x, y, o) {
+  const {
+    size = 56, weight = 600, family = 'Fraunces', italic = false, color = C.ink,
+    align = 'center', maxW = 900, lh = 1.18, tIn = 0, tOut = 1e9, t, stagger = 0.05, rise = 26, dur = 0.45,
+    spacing = 0,
+  } = o;
+  if (t < tIn || t > tOut + 0.5) return;
+  setFont(size, weight, family, italic);
+  ctx.letterSpacing = spacing + 'px';
+  const lines = wrap(text, maxW);
+  const outP = eInCubic(seg(t, tOut, tOut + 0.35));
+  let k = 0;
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = color;
+  lines.forEach((ln, li) => {
+    const ws = ln.split(' ');
+    const space = ctx.measureText(' ').width;
+    const widths = ws.map((w) => ctx.measureText(w).width);
+    const total = widths.reduce((a, b) => a + b, 0) + space * (ws.length - 1);
+    let cx = align === 'center' ? x - total / 2 : align === 'right' ? x - total : x;
+    const ly = y + li * size * lh;
+    ws.forEach((w, wi) => {
+      const p = eOutCubic(seg(t, tIn + k * stagger, tIn + k * stagger + dur));
+      const a = p * (1 - outP);
+      if (a > 0.001) {
+        ctx.globalAlpha = a;
+        ctx.textAlign = 'left';
+        ctx.fillText(w, cx, ly + (1 - p) * rise - outP * 18);
+      }
+      cx += widths[wi] + space;
+      k++;
+    });
+  });
+  ctx.globalAlpha = 1;
+  ctx.letterSpacing = '0px';
+}
+
+// ---------------------------------------------------------------- Glas
+function drawJar(x, y, w, h, fl, o = {}) {
+  const {
+    fill = 0.78, s = 1, rot = 0, alpha = 1, labelRot = 0, seed = 1, slosh = 0, label = true, shadow = true,
+    lidLift = 0,
+  } = o;
+  if (s <= 0.001 || alpha <= 0.001) return;
+  const f = T.FLAVORS[fl];
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.scale(s, s);
+  if (shadow) {
+    ctx.fillStyle = 'rgba(70,40,20,0.18)';
+    ctx.beginPath();
+    ctx.ellipse(0, 2, w * 0.56, Math.max(4, w * 0.08), 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const neckH = h * 0.07;
+  const body = rrPts(-w / 2, -h, w, h, w * 0.2, 4);
+  const amp = Math.max(1.2, w * 0.018);
+  // Glas-Grundton
+  const bj = jitterPts(body, seed, amp);
+  ctx.save();
+  ctx.beginPath();
+  tracePts(bj);
+  ctx.fillStyle = 'rgba(255,255,255,0.38)';
+  ctx.fill();
+  ctx.clip();
+  // Marmelade
+  const top = -h * clamp(fill, 0, 1);
+  if (fill > 0.001) {
+    const jg = ctx.createLinearGradient(-w / 2, 0, w / 2, 0);
+    jg.addColorStop(0, shade(f.jam, -0.28));
+    jg.addColorStop(0.35, shade(f.jam, 0.08));
+    jg.addColorStop(0.6, f.jam);
+    jg.addColorStop(1, shade(f.jam, -0.35));
+    ctx.fillStyle = jg;
+    ctx.beginPath();
+    ctx.moveTo(-w, 10);
+    const N = 10;
+    for (let i = 0; i <= N; i++) {
+      const xx = -w / 2 + (i / N) * w;
+      const yy = top + Math.sin(i * 0.9 + slosh * 3) * slosh * h * 0.05 + (xx / w) * slosh * h * 0.12;
+      ctx.lineTo(xx, yy);
+    }
+    ctx.lineTo(w, 10);
+    ctx.closePath();
+    ctx.fill();
+    // Fruchtstueckchen
+    ctx.fillStyle = shade(f.jam, -0.4);
+    for (let i = 0; i < 9; i++) {
+      const px = (hash(seed, i, 1) - 0.5) * w * 0.8;
+      const py = lerp(top + h * 0.06, -h * 0.05, hash(seed, i, 2));
+      if (py > top + 4) { ctx.globalAlpha = alpha * 0.5; ctx.beginPath(); ctx.arc(px, py, w * 0.022, 0, Math.PI * 2); ctx.fill(); }
+    }
+    ctx.globalAlpha = alpha;
+  }
+  // Glanzlichter
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.beginPath();
+  ctx.roundRect(-w * 0.36, -h * 0.86, w * 0.08, h * 0.7, w * 0.04);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.28)';
+  ctx.beginPath();
+  ctx.roundRect(w * 0.27, -h * 0.8, w * 0.045, h * 0.34, w * 0.03);
+  ctx.fill();
+  ctx.restore();
+  // Umriss
+  ctx.beginPath();
+  tracePts(bj);
+  ctx.lineWidth = Math.max(2.2, w * 0.034);
+  ctx.strokeStyle = C.ink;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+  // Etikett
+  if (label) {
+    ctx.save();
+    ctx.translate(0, -h * 0.42);
+    ctx.rotate(labelRot);
+    const lw = w * 0.8, lh = h * 0.32;
+    shape(rrPts(-lw / 2, -lh / 2, lw, lh, w * 0.05, 2), { fill: '#fbf4e4', lw: Math.max(1.6, w * 0.02), seed: seed + 3, amp: amp * 0.7 });
+    ctx.fillStyle = C.ink;
+    let fs = w * 0.25;
+    ctx.font = `700 ${fs}px Caveat`;
+    const tw = ctx.measureText(f.name).width;
+    if (tw > lw * 0.86) { fs *= (lw * 0.86) / tw; ctx.font = `700 ${fs}px Caveat`; }
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(f.name, 0, fs * 0.06);
+    ctx.restore();
+  }
+  // Hals und Stoffdeckel
+  ctx.save();
+  ctx.translate(0, -lidLift);
+  const nw = w * 0.86;
+  shape(rrPts(-nw / 2, -h - neckH, nw, neckH + h * 0.03, w * 0.04, 2), { fill: '#d9d2c4', lw: Math.max(2, w * 0.028), seed: seed + 5, amp: amp * 0.6 });
+  const capW = w * 1.02, capTop = -h - neckH - h * 0.1;
+  const cap = [];
+  const n = 9;
+  cap.push([-capW * 0.42, capTop]);
+  cap.push([capW * 0.42, capTop]);
+  for (let i = 0; i <= n; i++) {
+    const xx = capW / 2 - (i / n) * capW;
+    const yy = -h - neckH * 0.1 + (i % 2 === 0 ? h * 0.03 : -h * 0.01);
+    cap.push([xx, yy]);
+  }
+  shape(cap, { fill: gingham(f.lid), lw: Math.max(2, w * 0.03), seed: seed + 9, amp: amp * 0.8 });
+  // Schnur
+  line([[-nw / 2, -h - neckH * 0.35], [0, -h - neckH * 0.2], [nw / 2, -h - neckH * 0.35]], { lw: Math.max(1.5, w * 0.02), stroke: '#8a6a4a', seed: seed + 11, amp: 1 });
+  ctx.restore();
+  ctx.restore();
+}
+function shade(hex, k) {
+  const n = parseInt(hex.slice(1), 16);
+  let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  if (k >= 0) { r += (255 - r) * k; g += (255 - g) * k; b += (255 - b) * k; }
+  else { r *= 1 + k; g *= 1 + k; b *= 1 + k; }
+  return `rgb(${r | 0},${g | 0},${b | 0})`;
+}
+
+// ---------------------------------------------------------------- Figur
+// c: { x, y (Kopfmitte), tilt, gaze:[x,y], blink, mouth, brows, sweat, pupil, closed, pomX, arm, hold }
+function drawCustomerBody(c) {
+  ctx.save();
+  ctx.translate(c.x, c.y);
+  ctx.rotate(c.tilt * 0.5);
+  // Oberkoerper
+  shape(densify([[-170, 660], [-150, 215], [-110, 160], [-40, 138], [40, 138], [110, 160], [150, 215], [170, 660]], 40), { fill: C.sweater, seed: 41, amp: 2.4, lw: 4 });
+  // Tragetasche-Riemen
+  shape([[-92, 150], [-60, 146], [150, 560], [110, 580]], { fill: C.strap, seed: 42, amp: 2, lw: 3 });
+  // Kragen
+  shape(ellPts(0, 142, 62, 20, 16), { fill: C.sweaterDark, seed: 43, amp: 1.5, lw: 3.5 });
+  // Hals
+  shape(rrPts(-26, 100, 52, 50, 18, 3), { fill: C.skinShade, seed: 44, amp: 1.2, lw: 3.5 });
+  ctx.restore();
+}
+function drawCustomerHead(c) {
+  ctx.save();
+  ctx.translate(c.x, c.y);
+  ctx.rotate(c.tilt);
+  const R = 108;
+  // Haare seitlich unter der Muetze
+  shape([[-100, -52], [-120, 10], [-108, 62], [-86, 20], [-80, -30]], { fill: C.hair, seed: 51, amp: 2, lw: 3 });
+  shape([[100, -52], [120, 10], [108, 62], [86, 20], [80, -30]], { fill: C.hair, seed: 52, amp: 2, lw: 3 });
+  // Ohren
+  shape(ellPts(-R + 4, 24, 16, 22, 12), { fill: C.skin, seed: 54, amp: 1.4, lw: 3.5 });
+  shape(ellPts(R - 4, 24, 16, 22, 12), { fill: C.skin, seed: 55, amp: 1.4, lw: 3.5 });
+  // Kopf
+  shape(ellPts(0, 10, R, R * 1.02, 32), { fill: C.skin, seed: 53, amp: 2.4, lw: 4 });
+  // Wangen
+  ctx.fillStyle = C.cheek;
+  ctx.beginPath(); ctx.ellipse(-60, 62, 22, 14, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(60, 62, 22, 14, 0, 0, Math.PI * 2); ctx.fill();
+  // Augen
+  const gx = c.gaze[0] - c.x, gy = c.gaze[1] - c.y;
+  const gl = Math.hypot(gx, gy) || 1;
+  const px = (gx / gl) * 10 * clamp(gl / 200), py = (gy / gl) * 10 * clamp(gl / 200);
+  for (const side of [-1, 1]) {
+    const ex = side * 40, ey = 16;
+    if (c.closed > 0.5) {
+      // geschlossene Augen: froh (Boegen nach oben) oder erschoepft (nach unten)
+      const up = c.mouth === 'big' || c.mouth === 'smile';
+      line([[ex - 18, ey + (up ? 6 : 0)], [ex, ey + (up ? -6 : 8)], [ex + 18, ey + (up ? 6 : 0)]], { lw: 4.5, seed: 60 + side, amp: 1 });
+      continue;
+    }
+    shape(ellPts(ex, ey, 24, 28, 18), { fill: '#fffdf8', seed: 61 + side, amp: 1.2, lw: 3.5 });
+    const pr = 11.5 * (c.pupil ?? 1);
+    ctx.fillStyle = C.ink;
+    ctx.beginPath(); ctx.arc(ex + px, ey + py, pr, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(ex + px + pr * 0.35, ey + py - pr * 0.4, Math.max(2, pr * 0.32), 0, Math.PI * 2); ctx.fill();
+    // Lid beim Blinzeln
+    const bl = clamp(c.blink);
+    if (bl > 0.02) {
+      ctx.save();
+      ctx.beginPath(); ctx.ellipse(ex, ey, 25, 29, 0, 0, Math.PI * 2); ctx.clip();
+      ctx.fillStyle = C.skinShade;
+      ctx.fillRect(ex - 26, ey - 30, 52, 60 * bl);
+      ctx.restore();
+      if (bl > 0.9) line([[ex - 22, ey + 1], [ex + 22, ey + 1]], { lw: 3.5, seed: 63 + side, amp: 0.8 });
+    }
+  }
+  // Augenbrauen: brows > 0 froehlich, < 0 besorgt
+  for (const side of [-1, 1]) {
+    const by = -24 - (c.browUp || 0) * 8 - Math.max(0, c.brows) * 5;
+    const inner = Math.min(0, c.brows) * 12;
+    line([[side * 64, by + 5], [side * 42, by - 3 - Math.max(0, c.brows) * 3], [side * 20, by + 2 + inner]], { lw: 5.5, seed: 70 + side, amp: 1 });
+  }
+  // Mund
+  const m = c.mouth;
+  if (m === 'o') {
+    shape(ellPts(0, 76, 12, 15, 12), { fill: '#7a3030', seed: 80, amp: 1, lw: 4 });
+  } else if (m === 'wavy') {
+    line([[-26, 78], [-13, 70], [0, 79], [13, 70], [26, 78]], { lw: 4.5, seed: 81, amp: 1.5 });
+  } else if (m === 'smile') {
+    line([[-30, 66], [-13, 81], [13, 81], [30, 66]], { lw: 4.5, seed: 82, amp: 1 });
+  } else if (m === 'big') {
+    shape([[-34, 64], [34, 64], [22, 92], [0, 100], [-22, 92]], { fill: '#8a3434', seed: 83, amp: 1, lw: 4 });
+  } else if (m === 'flat') {
+    line([[-20, 78], [20, 78]], { lw: 4.5, seed: 84, amp: 1 });
+  } else {
+    line([[-16, 74], [0, 78], [16, 74]], { lw: 4.5, seed: 85, amp: 1 });
+  }
+  // Schweisstropfen
+  if (c.sweat > 0.01) {
+    ctx.globalAlpha = c.sweat;
+    const sy = c.sweat * 20;
+    shape([[96, -26 + sy], [110, 4 + sy], [96, 16 + sy], [82, 4 + sy]], { fill: '#bfe3ef', seed: 86, amp: 0.8, lw: 3 });
+    ctx.globalAlpha = 1;
+  }
+  // Muetze
+  shape([[-114, -50], [-110, -100], [-72, -146], [0, -162], [72, -146], [110, -100], [114, -50]], { fill: C.beanie, seed: 90, amp: 2, lw: 4 });
+  for (let i = -4; i <= 4; i++) line([[i * 22, -76], [i * 20, -132]], { stroke: 'rgba(120,70,20,0.35)', lw: 3, seed: 91 + i, amp: 1.2 });
+  shape(rrPts(-120, -80, 240, 42, 18, 3), { fill: C.beanieDark, seed: 92, amp: 1.8, lw: 4 });
+  // Bommel mit Nachschwingen
+  const bx = c.pomX || 0;
+  line([[0, -160], [bx * 0.5, -174], [bx, -186]], { lw: 3.5, seed: 93, amp: 0.5 });
+  shape(ellPts(bx, -194, 30, 28, 16), { fill: '#f2e3c4', seed: 94, amp: 3.2, lw: 3.5 });
+  ctx.restore();
+}
+function drawArm(from, to, t) {
+  // Aermel mit Hand
+  const mid = [(from[0] + to[0]) / 2 + 30, (from[1] + to[1]) / 2 + 40];
+  ctx.save();
+  ctx.lineCap = 'round';
+  const pts = [from, mid, to];
+  const p = jitterPts(pts, 101, 1.5);
+  ctx.beginPath(); tracePts(p, false);
+  ctx.strokeStyle = C.ink; ctx.lineWidth = 50; ctx.stroke();
+  ctx.strokeStyle = C.sweater; ctx.lineWidth = 42; ctx.stroke();
+  shape(ellPts(to[0], to[1], 25, 23, 14), { fill: C.skin, seed: 102, amp: 1.5, lw: 3.5 });
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- Gedankenblase
+function bubble(x, y, text, t0, t, o = {}) {
+  const { rot = 0, headX = 540, headY = 760, fadeAt = 1e9, size = 42 } = o;
+  const dt = t - t0;
+  if (dt < 0) return;
+  const s = spring(dt, 2.8, 0.38);
+  const out = seg(t, fadeAt, fadeAt + 0.35);
+  if (out >= 1) return;
+  setFont(size, 700, 'Caveat');
+  const tw = ctx.measureText(text).width;
+  const bw = tw + 60, bh = size * 1.55;
+  ctx.save();
+  ctx.globalAlpha = 1 - out;
+  // kleine Kringel zum Kopf
+  for (let i = 1; i <= 2; i++) {
+    const k = i / 3;
+    const cx = lerp(x, headX, 0.35 + k * 0.3), cy = lerp(y + bh * 0.4, headY - 120, 0.35 + k * 0.3);
+    const rr = (10 - i * 3) * s;
+    if (rr > 0.5) shape(ellPts(cx, cy, rr, rr, 10), { fill: '#fffdf7', seed: 200 + i, amp: 0.8, lw: 3 });
+  }
+  ctx.translate(x, y - out * 30);
+  ctx.rotate(rot);
+  ctx.scale(s, s);
+  // Wolkenform
+  const pts = [];
+  const n = 22;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    const bump = 1 + 0.09 * Math.cos(a * 7);
+    pts.push([Math.cos(a) * (bw / 2) * bump, Math.sin(a) * (bh / 2) * bump]);
+  }
+  shape(pts, { fill: '#fffdf7', seed: 210 + Math.floor(t0 * 10), amp: 2, lw: 3.5 });
+  ctx.fillStyle = C.ink;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 0, 2);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- Stand und Tisch
+function drawTable(yOff) {
+  const top = 1330 + yOff;
+  // Tischplatte
+  shape(densify([[-20, top], [W + 20, top], [W + 20, top + 52], [-20, top + 52]], 20), { fill: C.woodLight, seed: 300, amp: 1.6, lw: 4 });
+  line([[-20, top + 16], [W + 20, top + 16]], { stroke: 'rgba(120,70,30,0.3)', lw: 2.5, seed: 299, amp: 2 });
+  // Tischdecke
+  ctx.save();
+  ctx.beginPath();
+  const pts = densify([[-20, top + 44], [W + 20, top + 44], [W + 20, H + 60], [-20, H + 60]], 24);
+  const jp = jitterPts(pts, 301, 1.6);
+  tracePts(jp);
+  ctx.fillStyle = CLOTH;
+  ctx.save();
+  ctx.translate(0, top);
+  ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 4; ctx.strokeStyle = C.ink; ctx.stroke();
+  ctx.restore();
+  // Falten
+  for (let i = 1; i < 6; i++) line([[i * 180, top + 90], [i * 180 + 10, H]], { stroke: 'rgba(120,60,40,0.18)', lw: 6, seed: 310 + i, amp: 6 });
+}
+function drawTier(y, w, yOff, seed) {
+  const x0 = 540 - w / 2;
+  shape(densify([[x0, y + yOff], [x0 + w, y + yOff], [x0 + w, y + 26 + yOff], [x0, y + 26 + yOff]], 14), { fill: C.wood, seed, amp: 1.2, lw: 4 });
+  line([[x0 + 10, y + 13 + yOff], [x0 + w - 10, y + 13 + yOff]], { stroke: 'rgba(90,50,20,0.35)', lw: 2, seed: seed + 1, amp: 2 });
+}
+
+// ---------------------------------------------------------------- Kundschaft: Zustand als Funktion der Zeit
+function walk(t, t0, t1, x0, x1) {
+  const p = seg(t, t0, t1);
+  const e = eInOutSine(p);
+  const ph = p * Math.PI * T.STEPS_PER_WALK;
+  const moving = p > 0 && p < 1;
+  return {
+    x: lerp(x0, x1, e),
+    bob: moving ? -Math.abs(Math.sin(ph)) * 16 : 0,
+    tilt: moving ? Math.sin(ph) * 0.035 : 0,
+  };
+}
+function blinkAt(t, seed) {
+  // natuerliches Blinzeln alle 2 bis 4 Sekunden
+  let tt = 0.8 + hash(seed) * 1.5;
+  let i = 0;
+  while (tt < t + 1) {
+    const d = t - tt;
+    if (d >= 0 && d < 0.16) return Math.sin((d / 0.16) * Math.PI);
+    tt += 2.1 + hash(seed, i++) * 2.2;
+  }
+  return 0;
+}
+function jarWorld(layout, i) {
+  if (layout === 24) { const j = T.JARS24[i]; return [j.x, j.y - T.J24.h * 0.55]; }
+  if (layout === 6) { const j = T.JARS6[i]; return [j.x, j.y - T.J6.h * 0.55]; }
+  const j = T.JARS2[i]; return [j.x, j.y - T.J2.h * 0.55];
+}
+
+// Szene "Stand": gilt fuer Tag 1, Tag 2 und das Finale
+function stageState(t) {
+  const st = { layout: 24, tiers: 0, jars: [], cust: null, bubbles: [], orbit: [], card: null, chaos: 0, yOff: 0, freeze: false, held: null, arm: null };
+  const HEADY = 760;
+  if (t < T.REWIND.t1) {
+    // ----- Tag 1
+    st.layout = 24;
+    const tableIn = eOutBack(seg(t, 3.9, 4.5), 1.2);
+    st.yOff = (1 - tableIn) * 700;
+    st.tiers = eOutBack(seg(t, 4.55, 4.95), 1.4);
+    for (let i = 0; i < 24; i++) {
+      const j = T.JARS24[i];
+      const dt = t - T.POP24[i];
+      let s = dt < 0 ? 0 : spring(dt, 3.2, 0.33);
+      let jx = j.x, jy = j.y, rot = 0;
+      // Das Intro-Glas landet als erstes
+      if (i === 16) s = t >= T.POP24[i] ? 1 + ring(dt, 3, 8) * 0.08 : 0;
+      st.jars.push({ x: jx, y: jy, s, rot, fl: j.flavor, labelRot: j.labelRot, fill: j.fill, seed: 500 + i, slosh: ring(dt, 2.5, 4) * 0.6 });
+    }
+    // Kundschaft
+    const cz = T.CUST24;
+    if (t >= cz.enter[0]) {
+      let x, bob = 0, tilt = 0;
+      if (t < cz.leave[0]) { const w = walk(t, cz.enter[0], cz.enter[1], -260, 540); x = w.x; bob = w.bob; tilt = w.tilt; }
+      else { const w = walk(t, cz.leave[0], cz.leave[1], 540, 1360); x = w.x; bob = w.bob; tilt = w.tilt; }
+      const c = { x, y: HEADY + bob + Math.sin(t * 2.3) * 3, tilt, gaze: [x + 200, HEADY + 400], blink: blinkAt(t, 3), mouth: 'neutral', brows: 0, sweat: 0, pupil: 1, closed: 0, pomX: 0 };
+      // Blick waehrend des Eintretens nach vorne unten
+      if (t < cz.lookStart) c.gaze = [x + 120, HEADY + 500];
+      const g = lastBefore(T.GAZE24, t);
+      const chaos = seg(t, cz.lookStart, cz.freeze);
+      st.chaos = t < cz.freeze ? chaos : 0;
+      if (t >= cz.lookStart && t < cz.freeze) {
+        // Blick springt zum naechsten Glas (Sakkade)
+        const idx = T.GAZE24.indexOf(g);
+        const prev = idx > 0 ? T.GAZE24[idx - 1] : null;
+        const a = prev ? jarWorld(24, prev.jar) : [x, HEADY + 400];
+        const b = jarWorld(24, g.jar);
+        const p = eOutCubic(seg(t, g.t, g.t + 0.07));
+        c.gaze = [lerp(a[0], b[0], p), lerp(a[1], b[1], p)];
+        c.mouth = chaos < 0.35 ? 'neutral' : chaos < 0.7 ? 'o' : 'wavy';
+        c.brows = -chaos;
+        c.browUp = chaos * 0.8;
+        c.sweat = seg(chaos, 0.55, 0.8);
+        c.pupil = lerp(1, 0.55, chaos);
+        c.blink = 0;
+        c.tilt += Math.sin(t * 13) * 0.02 * chaos;
+      }
+      if (t >= cz.freeze && t < cz.leave[0]) {
+        // Stillstand, dann Ausatmen
+        const sigh = seg(t, cz.freeze + 0.35, cz.freeze + 0.9);
+        c.gaze = [x, HEADY + 300];
+        c.mouth = sigh > 0 ? 'flat' : 'wavy';
+        c.brows = -1 + sigh * 0.6;
+        c.browUp = 0.8 * (1 - sigh);
+        c.pupil = 0.55;
+        c.closed = sigh > 0.05 && sigh < 1 ? 1 : 0;
+        c.y += Math.sin(sigh * Math.PI) * 14;
+        c.sweat = 1 - sigh;
+        if (t > cz.freeze + 0.9) { c.closed = 0; c.gaze = [x + 300, HEADY + 80]; }
+      }
+      if (t >= cz.leave[0]) {
+        c.mouth = 'flat'; c.brows = -0.35; c.gaze = [x + 400, HEADY + 40];
+      }
+      // Bommel schwingt der Bewegung hinterher
+      const x2 = t < cz.leave[0] ? walk(t - 0.12, cz.enter[0], cz.enter[1], -260, 540).x : walk(t - 0.12, cz.leave[0], cz.leave[1], 540, 1360).x;
+      c.pomX = clamp((x2 - x) * 0.55, -40, 40) + ring(t - cz.enter[1], 2.2, 3) * 18 + ring(t - cz.leave[1], 2.2, 3) * 18 * (t > cz.leave[1] ? 1 : 0);
+      st.cust = c;
+      // Gedankenblasen
+      for (const b of T.BUBBLES24) {
+        if (t >= b.t) st.bubbles.push({ ...b, fadeAt: b.size ? cz.freeze + 1.1 : cz.freeze + 0.55 });
+      }
+      if (t >= T.LEAVE_BUBBLE.t) st.bubbles.push({ t: T.LEAVE_BUBBLE.t, text: T.LEAVE_BUBBLE.text, x: 640, y: 520, rot: 0.04, fadeAt: cz.leave[0] + 1.6, follow: true });
+      // Kreisende Glaeser
+      if (t < cz.freeze) {
+        for (const o of T.ORBIT) {
+          const dt = t - o.t;
+          if (dt < 0) continue;
+          st.orbit.push({ ...o, s: spring(dt, 3, 0.4) * o.scale, a: o.phase + o.speed * dt * 2.2 });
+        }
+      }
+      st.freeze = t >= cz.freeze && t < cz.freeze + 0.3;
+      // Karte
+      if (t >= cz.card60) st.card = t >= cz.card3 ? { big: 3, small: 'davon kaufen', t0: cz.card3, swap: true } : { big: 60, small: 'bleiben stehen', t0: cz.card60, end: cz.card3 };
+    }
+    return st;
+  }
+  if (t < bar(21)) {
+    // ----- Tag 2
+    st.layout = 6;
+    st.tiers = 0;
+    st.single = eOutCubic(seg(t, bar(9) - BEAT * 0.4, bar(9)));
+    const cz = T.CUST6;
+    for (let i = 0; i < 6; i++) {
+      const j = T.JARS6[i];
+      const dt = t - T.POP6[i];
+      let s = dt < 0 ? 0 : spring(dt, 3, 0.36);
+      const jj = { x: j.x, y: j.y, s, rot: 0, fl: j.flavor, labelRot: j.labelRot, fill: j.fill, seed: 700 + i, slosh: ring(dt, 2.5, 4) * 0.5 };
+      if (i === cz.pickJar && t >= cz.lift[0]) jj.hidden = true;
+      st.jars.push(jj);
+    }
+    if (t >= cz.enter[0]) {
+      const w = walk(t, cz.enter[0], cz.enter[1], -260, 540);
+      const x = w.x;
+      const c = { x, y: HEADY + w.bob + Math.sin(t * 2.3) * 3, tilt: w.tilt, gaze: [x + 150, HEADY + 500], blink: blinkAt(t, 9), mouth: 'neutral', brows: 0.2, sweat: 0, pupil: 1, closed: 0, pomX: 0 };
+      const x2 = walk(t - 0.12, cz.enter[0], cz.enter[1], -260, 540).x;
+      c.pomX = clamp((x2 - x) * 0.55, -40, 40) + ring(t - cz.enter[1], 2.2, 3) * 18;
+      const g = lastBefore(cz.gazes, t);
+      if (g) {
+        const idx = cz.gazes.indexOf(g);
+        const a = idx > 0 ? jarWorld(6, cz.gazes[idx - 1].jar) : [x + 150, HEADY + 500];
+        const b = jarWorld(6, g.jar);
+        const p = eInOutCubic(seg(t, g.t, g.t + 0.25));
+        c.gaze = [lerp(a[0], b[0], p), lerp(a[1], b[1], p)];
+        c.tilt += (c.gaze[0] - x) * 0.00012;
+      }
+      if (t >= cz.bubble) { c.mouth = 'smile'; c.brows = 0.6; }
+      if (t >= cz.lift[0]) { c.mouth = 'big'; c.gaze = [x + 60, HEADY + 260]; }
+      st.cust = c;
+      if (t >= cz.bubble) st.bubbles.push({ t: cz.bubble, text: 'Erdbeere.', x: 790, y: 560, rot: 0.05, fadeAt: cz.card30 + 0.6 });
+      // Greifen und Hochheben
+      const jp = jarWorld(6, cz.pickJar);
+      const shoulder = [x + 120, HEADY + 190];
+      const hold = [x + 70, HEADY + 330];
+      if (t >= cz.reach[0] && t < cz.lift[0]) {
+        const p = eInOutCubic(seg(t, cz.reach[0], cz.reach[1]));
+        st.arm = { from: shoulder, to: [lerp(shoulder[0] + 40, jp[0], p), lerp(shoulder[1] + 80, jp[1] - 60, p)] };
+      }
+      if (t >= cz.lift[0]) {
+        const p = eInOutCubic(seg(t, cz.lift[0], cz.lift[1]));
+        const j = T.JARS6[cz.pickJar];
+        const pos = [lerp(j.x, hold[0], p), lerp(j.y, hold[1] + T.J6.h * 0.5, p) - Math.sin(p * Math.PI) * 90];
+        st.held = { x: pos[0], y: pos[1], fl: j.flavor, w: T.J6.w, h: T.J6.h, fill: j.fill, labelRot: j.labelRot, seed: 702, slosh: ring(t - cz.lift[1], 2.2, 3) * 0.6 };
+        st.arm = { from: shoulder, to: [pos[0] + 30, pos[1] - T.J6.h * 0.45] };
+      }
+      if (t >= cz.card40) st.card = t >= cz.card30 ? { big: 30, small: 'davon kaufen', t0: cz.card30, swap: true } : { big: 40, small: 'bleiben stehen', t0: cz.card40, end: cz.card30 };
+    }
+    return st;
+  }
+  // ----- Finale: zwei Glaeser
+  st.layout = 2;
+  const tw = T.TWO;
+  st.yOff = (1 - spring(t - tw.stand, 1.6, 0.62)) * 800;
+  st.single = 1;
+  for (let i = 0; i < 2; i++) {
+    const j = T.JARS2[i];
+    const dt = t - tw.pops[i];
+    const jj = { x: j.x, y: j.y, s: dt < 0 ? 0 : spring(dt, 2.8, 0.36), rot: 0, fl: j.flavor, labelRot: j.labelRot, fill: j.fill, seed: 800 + i, slosh: ring(dt, 2.5, 4) * 0.5 };
+    if (i === tw.pickJar && t >= tw.lift[0]) jj.hidden = true;
+    st.jars.push(jj);
+  }
+  if (t >= tw.enter[0]) {
+    const w = walk(t, tw.enter[0], tw.enter[1], -260, 540);
+    const x = w.x;
+    const c = { x, y: HEADY + w.bob + Math.sin(t * 2.3) * 3, tilt: w.tilt, gaze: [x + 150, HEADY + 500], blink: blinkAt(t, 13), mouth: 'neutral', brows: 0.3, sweat: 0, pupil: 1, closed: 0, pomX: 0 };
+    const x2 = walk(t - 0.12, tw.enter[0], tw.enter[1], -260, 540).x;
+    c.pomX = clamp((x2 - x) * 0.55, -40, 40) + ring(t - tw.enter[1], 2.2, 3) * 18;
+    const g = lastBefore(tw.gazes, t);
+    if (g) {
+      const idx = tw.gazes.indexOf(g);
+      const a = idx > 0 ? jarWorld(2, tw.gazes[idx - 1].jar) : [x + 150, HEADY + 500];
+      const b = jarWorld(2, g.jar);
+      const p = eInOutCubic(seg(t, g.t, g.t + 0.3));
+      c.gaze = [lerp(a[0], b[0], p), lerp(a[1], b[1], p)];
+      c.tilt += (c.gaze[0] - x) * 0.00015;
+    }
+    if (t >= tw.bubble) { c.mouth = 'smile'; c.brows = 0.8; }
+    if (t >= tw.lift[0]) { c.mouth = 'big'; c.gaze = [x - 40, HEADY + 260]; c.closed = t > tw.sparkle && t < tw.sparkle + 0.9 ? 1 : 0; }
+    st.cust = c;
+    if (t >= tw.bubble) st.bubbles.push({ t: tw.bubble, text: 'Aprikose.', x: 290, y: 540, rot: -0.05, fadeAt: bar(25) - 0.2 });
+    const jp = jarWorld(2, tw.pickJar);
+    const shoulder = [x - 120, HEADY + 190];
+    const hold = [x - 60, HEADY + 330];
+    if (t >= tw.reach[0] && t < tw.lift[0]) {
+      const p = eInOutCubic(seg(t, tw.reach[0], tw.reach[1]));
+      st.arm = { from: shoulder, to: [lerp(shoulder[0] - 40, jp[0], p), lerp(shoulder[1] + 80, jp[1] - 90, p)] };
+    }
+    if (t >= tw.lift[0]) {
+      const p = eInOutCubic(seg(t, tw.lift[0], tw.lift[1]));
+      const j = T.JARS2[tw.pickJar];
+      const pos = [lerp(j.x, hold[0], p), lerp(j.y, hold[1] + T.J2.h * 0.42, p) - Math.sin(p * Math.PI) * 90];
+      st.held = { x: pos[0], y: pos[1], fl: j.flavor, w: T.J2.w * 0.85, h: T.J2.h * 0.85, fill: j.fill, labelRot: j.labelRot, seed: 801, slosh: ring(t - tw.lift[1], 2.2, 3) * 0.6 };
+      st.arm = { from: shoulder, to: [pos[0] - 20, pos[1] - T.J2.h * 0.4] };
+      st.sparkle = t - tw.sparkle;
+    }
+  }
+  return st;
+}
+
+function drawStage(t, st) {
+  const HEADY = 760;
+  // Kopfkino: Strahlen hinter der Figur
+  if (st.chaos > 0.01) {
+    ctx.save();
+    ctx.translate(540, 820);
+    ctx.rotate(t * 0.9 * st.chaos);
+    ctx.globalAlpha = 0.5 * st.chaos;
+    for (let i = 0; i < 16; i++) {
+      ctx.rotate((Math.PI * 2) / 16);
+      ctx.fillStyle = i % 2 ? 'rgba(224,164,58,0.35)' : 'rgba(200,40,58,0.18)';
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(1400, -150); ctx.lineTo(1400, 150); ctx.closePath(); ctx.fill();
+    }
+    ctx.restore();
+  }
+  // Kreisende Glaeser hinter dem Kopf
+  const orbitDraw = (front) => {
+    for (const o of st.orbit) {
+      const sn = Math.sin(o.a);
+      if ((sn > 0) !== front) continue;
+      const x = 540 + Math.cos(o.a) * o.rx;
+      const y = o.cy + sn * o.ry;
+      const depth = 0.75 + 0.25 * sn;
+      drawJar(x, y, 100, 124, o.flavor, { s: o.s * depth, rot: Math.cos(o.a) * 0.3, seed: 900 + o.flavor, alpha: 0.95, labelRot: 0.05, shadow: false });
+    }
+  };
+  orbitDraw(false);
+  const c = st.cust;
+  if (c) drawCustomerBody(c);
+  // Stufen
+  if (st.layout === 24 && st.tiers > 0) {
+    const off = (1 - st.tiers) * 420 + st.yOff;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, 0, W, 1330 + st.yOff + 2); ctx.clip();
+    drawTier(T.TIER_Y[0], 940, off, 400);
+    drawTier(T.TIER_Y[1], 960, off, 402);
+    ctx.restore();
+  }
+  if ((st.layout === 6 || st.layout === 2) && st.single > 0) {
+    const off = (1 - st.single) * 200 + st.yOff;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, 0, W, 1330 + st.yOff + 2); ctx.clip();
+    drawTier(1304, st.layout === 6 ? 960 : 700, off, 404);
+    ctx.restore();
+  }
+  // Glaeser: hintere Reihe zuerst
+  const wob = st.chaos;
+  const sorted = st.jars.map((j, i) => ({ ...j, i })).sort((a, b) => a.y - b.y);
+  const sz = st.layout === 24 ? T.J24 : st.layout === 6 ? T.J6 : T.J2;
+  for (const j of sorted) {
+    if (j.hidden) continue;
+    let rot = j.rot;
+    let jy = j.y + st.yOff;
+    if (wob > 0) {
+      rot += Math.sin(t * 9 + j.i * 1.7) * 0.12 * wob * wob;
+      jy += Math.sin(t * 11 + j.i) * 6 * wob * wob;
+    }
+    drawJar(j.x, jy, sz.w, sz.h, j.fl, { s: j.s, rot, labelRot: j.labelRot, fill: j.fill, seed: j.seed, slosh: j.slosh });
+  }
+  drawTable(st.yOff);
+  if (c) {
+    drawCustomerHead(c);
+    if (st.held) drawJar(st.held.x, st.held.y, st.held.w, st.held.h, st.held.fl, { fill: st.held.fill, labelRot: st.held.labelRot, seed: st.held.seed, slosh: st.held.slosh, shadow: false });
+    if (st.arm) drawArm(st.arm.from, st.arm.to, t);
+  }
+  orbitDraw(true);
+  // Funkeln beim Finale
+  if (st.sparkle !== undefined && st.sparkle > 0 && st.sparkle < 2.4) {
+    const p = st.sparkle;
+    for (let i = 0; i < 11; i++) {
+      const a = (i / 11) * Math.PI * 2 + 0.3;
+      const r = 120 + eOutCubic(clamp(p / 0.9)) * (130 + hash(i, 5) * 80);
+      const x = st.held.x + Math.cos(a) * r, y = st.held.y - T.J2.h * 0.4 + Math.sin(a) * r * 0.8;
+      const s = Math.sin(clamp((p - hash(i, 9) * 0.15) / 1.6) * Math.PI) * (22 + hash(i) * 16);
+      star(x, y, s, i % 2 ? '#e0a43a' : C.red);
+    }
+  }
+  // Blasen
+  for (const b of st.bubbles) {
+    bubble(b.x, b.y, b.text, b.t, t, { rot: b.rot, headX: c ? c.x : 540, headY: HEADY, fadeAt: b.fadeAt, size: b.size || 44 });
+  }
+  // Karte auf der Tischdecke
+  if (st.card) drawCard(t, st.card, st.yOff);
+}
+function star(x, y, s, color) {
+  if (s <= 0.5) return;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  for (let i = 0; i < 8; i++) {
+    const r = i % 2 === 0 ? s : s * 0.3;
+    const a = (i / 8) * Math.PI * 2 - Math.PI / 2;
+    ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r);
+  }
+  ctx.closePath();
+  ctx.fill();
+}
+function drawCard(t, card, yOff) {
+  const dt = t - card.t0;
+  // Umblaettern: alte Karte klappt zu, neue klappt auf
+  let flip = card.swap ? eOutCubic(clamp(dt / 0.16)) : 1;
+  if (card.end !== undefined) flip *= eOutCubic(clamp((card.end - t) / 0.16));
+  flip = Math.max(0.02, flip);
+  const s = card.swap ? 1 : spring(dt, 2.6, 0.4);
+  const cx = 540, cy = 1650 + yOff;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(-0.035);
+  ctx.scale(clamp(s, 0, 1.2), flip);
+  ctx.fillStyle = 'rgba(60,30,15,0.18)';
+  ctx.fillRect(-282, -142, 580, 300);
+  shape(rrPts(-290, -150, 580, 300, 14, 3), { fill: C.card, seed: 600, amp: 2, lw: 4 });
+  // Klebestreifen
+  ctx.fillStyle = 'rgba(230,214,170,0.75)';
+  ctx.save(); ctx.translate(-250, -150); ctx.rotate(-0.5); ctx.fillRect(-45, -14, 90, 28); ctx.restore();
+  ctx.save(); ctx.translate(250, -150); ctx.rotate(0.5); ctx.fillRect(-45, -14, 90, 28); ctx.restore();
+  const n = Math.round(card.big * eOutCubic(seg(dt, 0.05, 0.7)));
+  setFont(170, 800, 'Fraunces');
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = C.red;
+  const numStr = String(n);
+  const pct = '%';
+  const nw = ctx.measureText(numStr).width;
+  setFont(120, 700, 'Fraunces');
+  const pw = ctx.measureText(pct).width;
+  const total = nw + 22 + pw;
+  setFont(170, 800, 'Fraunces');
+  ctx.textAlign = 'left';
+  ctx.fillText(numStr, -total / 2, 40);
+  setFont(120, 700, 'Fraunces');
+  ctx.fillText(pct, -total / 2 + nw + 22, 40);
+  setFont(44, 600, 'Inter');
+  ctx.fillStyle = C.ink;
+  ctx.textAlign = 'center';
+  ctx.fillText(card.small, 0, 112);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- Intro
+function drawIntro(t) {
+  // Glas zeichnet sich selbst, fuellt sich, Titel faellt Buchstabe fuer Buchstabe
+  const jarIn = seg(t, 0.1, 1.0);
+  const fillP = eInOutCubic(seg(t, 0.8, 1.7));
+  const fly = eInOutCubic(seg(t, bar(2) - BEAT * 1.2, bar(2)));
+  const j = T.JARS24[16];
+  const x = lerp(540, j.x, fly), y = lerp(1300, j.y, fly);
+  const w = lerp(300, T.J24.w, fly), h = lerp(372, T.J24.h, fly);
+  if (t < bar(2)) {
+    // Umriss-Zeichnung ueber Clip von unten nach oben
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, lerp(1330, 800, eOutCubic(jarIn)) - (fly > 0 ? 2000 : 0), W, 2000);
+    ctx.clip();
+    drawJar(x, y, w, h, T.JARS24[16].flavor, { fill: 0.8 * fillP, seed: 516, labelRot: j.labelRot, slosh: ring(t - 1.7, 2, 3) * 0.8, label: t > 1.2 });
+    ctx.restore();
+  }
+  // Titel
+  const title = '24 Gläser';
+  setFont(168, 800, 'Fraunces');
+  ctx.textBaseline = 'alphabetic';
+  const chars = [...title];
+  const widths = chars.map((ch) => ctx.measureText(ch).width);
+  const total = widths.reduce((a, b) => a + b, 0);
+  let cx = 540 - total / 2;
+  const out = eInCubic(seg(t, bar(2) - BEAT * 1.4, bar(2) - BEAT * 0.6));
+  chars.forEach((ch, i) => {
+    const t0 = bar(0.5) + i * (BEAT / 4);
+    const s = spring(t - t0, 2.6, 0.42);
+    if (t >= t0 && out < 1) {
+      ctx.save();
+      ctx.globalAlpha = clamp((t - t0) * 8) * (1 - out);
+      ctx.translate(cx + widths[i] / 2, 560 - (1 - s) * 90 - out * 60);
+      ctx.rotate((1 - s) * (i % 2 ? 0.2 : -0.2));
+      ctx.fillStyle = i < 2 ? C.red : C.ink;
+      ctx.textAlign = 'center';
+      ctx.fillText(ch, 0, 0);
+      ctx.restore();
+    }
+    cx += widths[i];
+  });
+  words('Ein Experiment über zu viel Auswahl', 540, 668, { t, tIn: bar(1), tOut: bar(2) - BEAT * 1.4, size: 50, weight: 500, italic: true, color: C.ink });
+  words('EIN SUPERMARKT IN KALIFORNIEN', 540, 1560, { t, tIn: bar(1.5), tOut: bar(2) - BEAT * 1.4, size: 34, weight: 600, family: 'Inter', spacing: 5, color: C.inkSoft, stagger: 0.08 });
+}
+
+// ---------------------------------------------------------------- Diagramm
+function drawChart(t) {
+  const ch = T.CHART;
+  const out = eInCubic(seg(t, ch.out[0], ch.out[1]));
+  const fillP = seg(t, ch.fill[0], ch.fill[1]);
+  const JW = 300, JH = 480;
+  const L = [290, 1440], R = [790, 1440];
+  // rechtes Glas: kommt aus der Hand der Kundschaft
+  const fly = eInOutCubic(seg(t, ch.fly[0], ch.fly[1]));
+  const hold = [540 + 70, 760 + 330 + T.J6.h * 0.5];
+  const rx = lerp(hold[0], R[0], fly), ry = lerp(hold[1], R[1], fly);
+  const rs = lerp(1, 1, fly);
+  const rw = lerp(T.J6.w, JW, fly), rh = lerp(T.J6.h, JH, fly);
+  const drain = eInOutCubic(seg(t, ch.fly[1], ch.fill[0] - 0.05));
+  const rFill = fillP > 0 ? 0.3 * eOutCubic(fillP) : T.JARS6[2].fill * (1 - drain);
+  const lDrop = spring(t - ch.dropLeft, 2.2, 0.45);
+  const lFill = 0.03 * eOutCubic(fillP);
+  const slosh = ring(t - ch.fill[1], 2, 3) * 0.4;
+  const sOut = 1 - out;
+  // Ueberschrift
+  words('Wie viele von denen, die stehen blieben, kauften ein Glas?', 540, 300, { t, tIn: ch.fly[0] + 0.3, tOut: ch.out[0], size: 54, weight: 600, maxW: 880 });
+  if (t >= ch.dropLeft) drawJar(L[0], L[1] - (1 - lDrop) * 1500, JW, JH, 0, { fill: lFill, s: sOut, seed: 1100, labelRot: -0.03, slosh, label: false });
+  drawJar(rx, ry, rw, rh, 0, { fill: rFill, s: rs * sOut, seed: 1101, labelRot: 0.03, slosh, label: fly < 0.5 });
+  // Prozentzahlen
+  if (t >= ch.fill[0]) {
+    const a = seg(t, ch.fill[0], ch.fill[0] + 0.3) * sOut;
+    ctx.globalAlpha = a;
+    setFont(130, 800, 'Fraunces');
+    ctx.textAlign = 'center';
+    ctx.fillStyle = C.red;
+    const nL = Math.round(3 * eOutCubic(fillP)), nR = Math.round(30 * eOutCubic(fillP));
+    ctx.fillText(nL + ' %', L[0], L[1] - JH - 110);
+    ctx.fillText(nR + ' %', R[0], R[1] - JH - 110);
+    ctx.globalAlpha = 1;
+  }
+  words('24 Sorten', L[0], 1540, { t, tIn: ch.dropLeft + 0.3, tOut: ch.out[0], size: 50, weight: 700 });
+  words('6 Sorten', R[0], 1540, { t, tIn: ch.fly[1] - 0.2, tOut: ch.out[0], size: 50, weight: 700 });
+  words('Zehnmal so viele Käufe mit weniger Auswahl.', 540, 1700, { t, tIn: ch.caption, tOut: ch.out[0], size: 52, weight: 700, italic: true, color: C.red, maxW: 900 });
+  words('Iyengar & Lepper (2000), Draeger’s Market, Menlo Park', 540, 1850, { t, tIn: ch.fill[0], tOut: ch.out[0], size: 26, weight: 500, family: 'Inter', color: C.inkSoft });
+}
+
+// ---------------------------------------------------------------- Meta-Analyse 2010
+function drawMeta(t) {
+  const m = T.META;
+  const out = seg(t, m.out[0], m.out[1]);
+  words('Das Experiment wurde weltberühmt.', 540, 270, { t, tIn: bar(15) + BEAT * 0.75, tOut: bar(16) + BEAT, size: 60, weight: 700, maxW: 860 });
+  words('Später haben andere nachgerechnet.', 540, 450, { t, tIn: bar(15.5) + BEAT * 0.25, tOut: bar(16) + BEAT, size: 52, weight: 500, italic: true });
+  words('2010: 50 Experimente mit 5.036 Menschen', 540, 330, { t, tIn: bar(16) + BEAT * 1.5, tOut: m.out[0], size: 54, weight: 700, maxW: 920 });
+  // Achse
+  const ax = eInOutCubic(seg(t, m.axis[0], m.axis[1]));
+  if (ax > 0) {
+    ctx.globalAlpha = 1 - out;
+    line([[540 - 420 * ax, T.AXIS_Y], [540 + 420 * ax, T.AXIS_Y]], { lw: 4.5, seed: 1200, amp: 1.5 });
+    line([[540, T.AXIS_Y - 14], [540, T.AXIS_Y + 14]], { lw: 4, seed: 1201, amp: 1 });
+    ctx.globalAlpha = 1;
+    words('Mehr Auswahl hilft', 150, T.AXIS_Y + 72, { t, tIn: m.axis[1] - 0.2, tOut: m.out[0], size: 34, weight: 600, family: 'Inter', align: 'left', color: C.inkSoft });
+    words('Mehr Auswahl schadet', 930, T.AXIS_Y + 72, { t, tIn: m.axis[1], tOut: m.out[0], size: 34, weight: 600, family: 'Inter', align: 'right', color: C.inkSoft });
+    words('0', 540, T.AXIS_Y + 72, { t, tIn: m.axis[1] - 0.1, tOut: m.out[0], size: 34, weight: 700, family: 'Inter', color: C.inkSoft });
+    words('Jeder Punkt: ein Versuch (schematisch)', 540, T.AXIS_Y + 150, { t, tIn: m.rain[0], tOut: m.out[0], size: 30, weight: 500, family: 'Inter', color: C.inkSoft });
+  }
+  // Punkte fallen wie Marmeladentropfen
+  for (const d of T.DOTS) {
+    const dt = t - d.t;
+    if (dt < -0.45) continue;
+    const ty = T.AXIS_Y - T.DOT_R - 3 - d.stack * (T.DOT_R * 2 + 2);
+    const fallDur = 0.45;
+    const p = clamp((dt + fallDur) / fallDur);
+    const y = lerp(-40, ty, p * p);
+    const land = dt > 0 ? ring(dt, 4, 9) : 0;
+    const sq = dt < 0 ? 1.25 : 1 - land * 0.35;
+    const floatUp = out > 0 ? eInCubic(out) * (400 + hash(d.x, d.stack) * 600) : 0;
+    ctx.save();
+    ctx.globalAlpha = 1 - out;
+    ctx.translate(d.x, y - floatUp);
+    ctx.scale(1 / sq, sq);
+    ctx.fillStyle = d.color;
+    ctx.beginPath(); ctx.arc(0, 0, T.DOT_R, 0, Math.PI * 2); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = C.ink; ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.beginPath(); ctx.arc(-4.5, -5, 4.5, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    if (d.jam) {
+      const a = seg(t, d.t + 0.15, d.t + 0.5) * (1 - seg(t, m.rain[0] + 0.8, m.rain[0] + 1.4));
+      if (a > 0) {
+        ctx.globalAlpha = a;
+        line([[d.x, ty - 30], [d.x - 30, ty - 130]], { lw: 3.5, seed: 1210, amp: 1 });
+        ctx.globalAlpha = 1;
+        words('Die Marmeladen-Studie', d.x - 40, ty - 150, { t, tIn: d.t + 0.2, tOut: m.rain[0] + 0.8, size: 42, weight: 700, family: 'Caveat', align: 'right', color: C.red, maxW: 700 });
+      }
+    }
+  }
+  // Mittelwert-Linie
+  const mp = eOutCubic(seg(t, m.mean, m.mean + 0.5));
+  if (mp > 0) {
+    ctx.globalAlpha = 1 - out;
+    ctx.setLineDash([14, 12]);
+    line([[540, T.AXIS_Y], [540, lerp(T.AXIS_Y, 900, mp)]], { lw: 5, stroke: C.red, seed: 1220, amp: 0.5 });
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+    words('Im Schnitt: praktisch kein Effekt.', 540, 820, { t, tIn: m.mean + 0.2, tOut: m.out[0], size: 56, weight: 800, color: C.red, maxW: 940 });
+  }
+  words('Scheibehenne, Greifeneder & Todd (2010)', 540, 1850, { t, tIn: bar(16) + BEAT * 1.5, tOut: m.out[0], size: 26, weight: 500, family: 'Inter', color: C.inkSoft });
+}
+
+// ---------------------------------------------------------------- Vier Bedingungen (2015)
+const MODER_TEXT = [
+  'die Optionen kompliziert sind',
+  'die Entscheidung schwerfällt',
+  'man nicht weiß, was man will',
+  'man es schnell hinter sich bringen will',
+];
+function drawModer(t) {
+  const m = T.MODER;
+  words('Eine zweite Auswertung, 2015:', 540, 300, { t, tIn: m.head, tOut: m.out[0], size: 50, weight: 500, italic: true });
+  words('Zu viel Auswahl lähmt vor allem, wenn', 540, 400, { t, tIn: m.head + BEAT, tOut: m.out[0], size: 58, weight: 700, maxW: 940 });
+  m.items.forEach((ti, i) => {
+    const y = 660 + i * 270;
+    const dt = t - ti;
+    const out = eInCubic(seg(t, m.out[0] + i * 0.06, m.out[0] + 0.4 + i * 0.06));
+    if (dt < 0) return;
+    const s = spring(dt, 2.6, 0.4);
+    // Kreis mit Nummer, wie ein Deckel von oben
+    ctx.save();
+    ctx.translate(160 - out * 300, y);
+    ctx.scale(s, s);
+    ctx.globalAlpha = 1 - out;
+    const col = [T.FLAVORS[0].jam, T.FLAVORS[1].jam, T.FLAVORS[3].jam, T.FLAVORS[12].jam][i];
+    shape(ellPts(0, 0, 62, 62, 24), { fill: col, seed: 1300 + i, amp: 2.4, lw: 4 });
+    setFont(64, 800, 'Fraunces');
+    ctx.fillStyle = '#fff8ea';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(i + 1), 0, 4);
+    ctx.restore();
+    words(MODER_TEXT[i], 260 - out * 300, y + 18, { t, tIn: ti + 0.08, tOut: m.out[0] + i * 0.06, size: 54, weight: 600, align: 'left', maxW: 740, stagger: 0.04 });
+  });
+  words('Chernev, Böckenholt & Goodman (2015), 99 Vergleiche', 540, 1850, { t, tIn: m.head + BEAT * 2, tOut: m.out[0], size: 26, weight: 500, family: 'Inter', color: C.inkSoft });
+}
+
+// ---------------------------------------------------------------- Texte im Stand-Teil
+function drawStageTexts(t) {
+  words('Tag 1: ein Probierstand mit 24 Sorten Marmelade.', 540, 250, { t, tIn: bar(2) + BEAT * 0.5, tOut: bar(8) - BEAT * 0.5, size: 54, weight: 600, maxW: 900 });
+  words('Tag 2: derselbe Stand, nur 6 Sorten.', 540, 250, { t, tIn: bar(9), tOut: bar(13) - BEAT * 0.3, size: 54, weight: 600, maxW: 900 });
+  words('Du hast mir erzählt, dass dich zu viel Auswahl lähmt.', 540, 250, { t, tIn: T.TWO.line1, tOut: T.TWO.line2 - 0.35, size: 56, weight: 600, maxW: 900 });
+  words('Deshalb zeige ich dir immer nur zwei.', 540, 250, { t, tIn: T.TWO.line2, tOut: bar(25) - 0.2, size: 60, weight: 700, maxW: 900, color: C.ink });
+}
+
+// ---------------------------------------------------------------- Zurueckspulen
+function rewindOverlay(t) {
+  const p = seg(t, T.REWIND.t0, T.REWIND.t1);
+  const on = t >= T.REWIND.t0 && t < T.REWIND.t1 + 0.1;
+  if (!on) return;
+  const k = Math.sin(p * Math.PI);
+  // Streifen und Zeilenversatz
+  const img = ctx.getImageData(0, 0, W, H);
+  const src = new Uint32Array(img.data.buffer.slice(0));
+  const dst = new Uint32Array(img.data.buffer);
+  const band = ((t * 3.3) % 1) * H;
+  for (let y = 0; y < H; y++) {
+    const inBand = Math.abs(y - band) < 70;
+    const off = Math.round((hash(y >> 2, Math.floor(t * 30)) - 0.5) * 18 * k + (inBand ? 40 * k : 0));
+    if (!off) continue;
+    const row = y * W;
+    for (let x = 0; x < W; x++) {
+      const sx = Math.min(W - 1, Math.max(0, x + off));
+      dst[row + x] = src[row + sx];
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  ctx.save();
+  ctx.globalAlpha = 0.12 * k + 0.05;
+  ctx.fillStyle = '#000';
+  for (let y = 0; y < H; y += 4) ctx.fillRect(0, y, W, 1.5);
+  ctx.globalAlpha = 0.35 * k;
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, band - 30, W, 60 * k);
+  ctx.restore();
+  // Symbol und Schrift
+  ctx.save();
+  ctx.globalAlpha = clamp(k * 3);
+  ctx.fillStyle = '#fffdf6';
+  ctx.strokeStyle = C.ink;
+  ctx.lineWidth = 4;
+  const bx = 90, by = 1710;
+  for (let i = 0; i < 2; i++) {
+    ctx.beginPath();
+    ctx.moveTo(bx + 60 + i * 55, by - 40);
+    ctx.lineTo(bx + 60 + i * 55, by + 40);
+    ctx.lineTo(bx + i * 55, by);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+  }
+  setFont(56, 800, 'Inter');
+  ctx.letterSpacing = '6px';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = 8;
+  ctx.strokeText('ZURÜCK', bx + 190, by + 3);
+  ctx.fillText('ZURÜCK', bx + 190, by + 3);
+  ctx.letterSpacing = '0px';
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- Abspann
+function drawEnd(t) {
+  const e = T.END;
+  words('24 Gläser', 540, 820, { t, tIn: e.title, size: 150, weight: 800, stagger: 0.12, dur: 0.6, color: C.ink });
+  words('Jedes Bild und jeder Ton in diesem Film ist Code.', 540, 980, { t, tIn: e.l1, size: 44, weight: 500, italic: true, maxW: 860 });
+  words('Geschrieben von Claude. Für dich.', 540, 1130, { t, tIn: e.l2, size: 44, weight: 700, maxW: 860, color: C.red });
+  words('Quellen: Iyengar & Lepper 2000 · Scheibehenne u. a. 2010 · Chernev u. a. 2015', 540, 1760, { t, tIn: e.src, size: 26, weight: 500, family: 'Inter', color: C.inkSoft, maxW: 900 });
+}
+
+// ---------------------------------------------------------------- Kamera
+function camera(t) {
+  // Zoom ins Kopfkino, Wackeln bei Ueberforderung
+  const cz = T.CUST24;
+  let s = 1, cx = 540, cy = 1000, rot = 0, dx = 0, dy = 0;
+  if (t >= cz.lookStart && t < cz.freeze + 1.5) {
+    const inP = eInOutCubic(seg(t, cz.lookStart, cz.freeze));
+    const back = eInOutCubic(seg(t, cz.freeze + 0.35, cz.freeze + 1.4));
+    s = 1 + 0.22 * inP * (1 - back);
+    cy = 900;
+    const sh = t < cz.freeze ? Math.pow(inP, 2) : 0;
+    dx = (hash(Math.floor(t * 30), 1) - 0.5) * 16 * sh;
+    dy = (hash(Math.floor(t * 30), 2) - 0.5) * 16 * sh;
+    rot = Math.sin(t * 5) * 0.012 * sh;
+  }
+  // sanftes Atmen der Kamera im Finale
+  if (t >= bar(21.5) && t < bar(25)) {
+    s = 1 + 0.06 * eInOutSine(seg(t, bar(22.5), bar(24.5)));
+    cy = 1000;
+  }
+  return { s, cx, cy, rot, dx, dy };
+}
+
+// ---------------------------------------------------------------- Frame
+function stageTime(t) {
+  if (t >= T.REWIND.t0 && t < T.REWIND.t1) return T.rewindMap(t);
+  return t;
+}
+function renderAt(t) {
+  BOIL = Math.floor(t * 12);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(PAPER, 0, 0);
+
+  const inStage = (t >= 3.9 && t < bar(13) + BEAT * 1.25) || (t >= bar(21) && t < bar(25) + BEAT * 1.5);
+  if (t < bar(2) && !inStage) drawIntro(t);
+  if (inStage) {
+    const cam = camera(stageTime(t));
+    ctx.save();
+    // Uebergang in das Diagramm: Stand faellt nach unten weg
+    const drop = t >= bar(13) && t < bar(15) ? eInCubic(seg(t, T.CHART.fly[0], T.CHART.fly[0] + BEAT * 1.1)) * 1500 : 0;
+    ctx.translate(cam.cx + cam.dx, cam.cy + cam.dy + drop);
+    ctx.rotate(cam.rot);
+    ctx.scale(cam.s, cam.s);
+    ctx.translate(-cam.cx, -cam.cy);
+    const stT = stageTime(t);
+    let st;
+    if (t >= bar(13) && t < bar(21)) {
+      st = stageState(Math.min(stT, T.CUST6.card30 + 0.8));
+      st.held = null; st.arm = null; st.bubbles = [];
+    } else st = stageState(stT);
+    // Nach dem Zurueckspulen: Tag 2 beginnt mit leerem Tisch
+    drawStage(stT, st);
+    ctx.restore();
+    // Intro-Glas fliegt waehrend des Tischaufbaus noch sichtbar
+    if (t < bar(2)) drawIntro(t);
+    drawStageTexts(t);
+  }
+  if (t >= bar(13) && t < bar(15.5)) drawChart(t);
+  if (t >= bar(15) && t < bar(18.75)) drawMeta(t);
+  if (t >= bar(18) && t < bar(21.5)) drawModer(t);
+  // Irisblende zum Abspann
+  if (t >= T.END.iris[0]) {
+    const p = eInOutCubic(seg(t, T.END.iris[0], T.END.iris[1]));
+    const hx = 540 - 60, hy = 760 + 330;
+    const r = lerp(1500, 0, p);
+    ctx.save();
+    ctx.fillStyle = C.paper;
+    ctx.beginPath();
+    ctx.rect(0, 0, W, H);
+    ctx.arc(hx, hy, Math.max(0.1, r), 0, Math.PI * 2, true);
+    ctx.fill('evenodd');
+    if (r > 1) {
+      ctx.lineWidth = 6; ctx.strokeStyle = C.ink;
+      ctx.beginPath(); ctx.arc(hx, hy, r, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+    if (p >= 1) { ctx.drawImage(PAPER, 0, 0); }
+    drawEnd(t);
+  }
+  rewindOverlay(t);
+  // Stille beim Einfrieren: kurzer Blitz
+  const fz = T.CUST24.freeze;
+  if (t >= fz && t < fz + 0.12) {
+    ctx.fillStyle = `rgba(255,252,240,${0.5 * (1 - (t - fz) / 0.12)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  // Papierkorn, Vignette
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.drawImage(VIGNETTE, 0, 0);
+  ctx.globalCompositeOperation = 'overlay';
+  ctx.drawImage(GRAIN[Math.floor(t * 15) % 3], 0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over';
+  // Ausblenden am Ende
+  const f = seg(t, T.END.fade[0], T.END.fade[1]);
+  if (f > 0) { ctx.fillStyle = `rgba(29,22,17,${f})`; ctx.fillRect(0, 0, W, H); }
+}
+
+async function init() {
+  await Promise.all([
+    document.fonts.load('800 100px Fraunces'),
+    document.fonts.load('italic 500 50px Fraunces'),
+    document.fonts.load('600 40px Inter'),
+    document.fonts.load('700 40px Caveat'),
+  ]);
+  buildTextures();
+  buildCloth();
+}
+window.ready = init();
+window.renderAt = (t) => renderAt(t);
+window.META_INFO = { W, H, FPS: T.FPS, DURATION: T.DURATION };
+// Vorschau im Browser: ?t=12.3 zeigt einen Frame, ohne Parameter laeuft der Film
+window.ready.then(() => {
+  const q = new URLSearchParams(location.search);
+  if (q.has('render')) return;
+  if (q.has('t')) { renderAt(parseFloat(q.get('t'))); return; }
+  const start = performance.now();
+  const loop = () => { renderAt(((performance.now() - start) / 1000) % T.DURATION); requestAnimationFrame(loop); };
+  loop();
+});
+</script>
+</body>
+</html>
